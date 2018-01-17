@@ -1,2 +1,2 @@
 # fMRI_LAMBDA
-MATLAB code for fMRI analysis (DCM and GLM)
+MATLAB code for fMRI analysis on LAMBDA project (DCM and GLM)
