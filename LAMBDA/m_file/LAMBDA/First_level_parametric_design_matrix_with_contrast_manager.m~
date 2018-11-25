@@ -1,0 +1,179 @@
+%% Part 1-a - First Level (Parametric) Design Matrix with contrast manager 
+%% [before 1-b(categorical), which is used for DCM conditions specification]
+%% This (1-a) is for ROI identification
+%spm_jobman('initcfg') -- before running the batch
+
+addpath(char("D:\GoogleDrive\Lambda_code\m_file\LAMBDA\tool_code"));% enable read_mixed_csv()
+path='D:\Yun-Shiuan_LAMBDA\raw_data';
+cd(path);
+subject_list=cellstr(ls('*')); % subject list
+subject_list=subject_list(~cellfun(@isempty,regexp(subject_list,'(?<=df)\d+','match')));% include only subject name
+subject_list=subject_list(~ismember(subject_list,{'df1001','df1054'})); %Exclude df1001(no T1) and df1054(incomplete)
+%(note: df1014 & de1018 has abnormal amount of runs)
+
+%% Read in run inclusion index info
+run_inclusion_index=cellfun(@(x) regexprep(x,'"',''),...
+                read_mixed_csv("D:\Yun-Shiuan_LAMBDA\Run_inclusion_info\inclusive_runs_indexes.csv",','),'un',0);
+run_inclusion_index=table(run_inclusion_index(2:end,2),run_inclusion_index(2:end,3),...
+                    'VariableNames',{'sub_id','run_num'});
+%% Read in and Insert task-related information(e.g., onset, response, condition)
+path_first='D:\Yun-Shiuan_LAMBDA\First_level_parametric_design_matrix_and_result\with_reslice';
+onset_var={'fix_onset', 'fraccomp_sti_onset','fraccomp_resp_onset'};
+time_var={'fix_onset','fix_duration','fraccomp_sti_onset','fraccomp_resp_onset','fraccomp_resp_RT'};
+volumes=strtrim(cellstr(num2str([6:110]', ',%d')));%Create the trimed indexex(6~110) for indexing EIP .nii file
+%% Create First Level Batch for all participants
+error_first_matrix={};
+for i=1:size(subject_list,1)
+    load('D:\Yun-Shiuan_LAMBDA\First_level_parametric_design_matrix_and_result\template.mat'); 
+% Specify outputs of SPM.mat and all first level results
+    output_dir=strcat(path_first,'\',subject_list{i});
+    matlabbatch{1}.spm.stats.fmri_spec.dir = {output_dir};
+
+% Read the inclusion run indexs and use them to index runs in the following while loop
+    run_rows=strcmp(run_inclusion_index.sub_id,subject_list{i});        
+        run_valid=table2cell(run_inclusion_index(run_rows,'run_num'));
+        run_valid=regexp(run_valid,'(?<=r)\d+','match');
+        run_valid=str2double([run_valid{:}]');
+    if(isnan(run_valid)==1)
+        error_first_matrix{i,1}=strcat('Sub',subject_list{i},' no valid runs');
+    else
+        mkdir(output_dir);
+        %Loop through each valid run
+        batch_index=0;%Because SPM require 'sess' sumber to be consecutive(i.e.,1,2,3,...), this index will differ from 'r', which refer to the true run number
+
+        for run=1:length(run_valid)
+            r=run_valid(run);% The index refer to the real run number of the task (so it might not be consecutive due to exclusive runs)
+            batch_index=batch_index+1;% see comment above
+            
+          % Insert the correct images for this run
+            scans=strcat('D:\Yun-Shiuan_LAMBDA\preprocessed_data_with_reslice_trial2\',...
+                subject_list{i},'\',...
+                'swarrun_',num2str(r),'.nii',volumes);
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).scans = scans;
+
+          % Read in run info (Onset and Values)
+            csv=strcat("D:\Yun-Shiuan_LAMBDA\EprimeData_raw\DevFracs",...
+                regexprep(subject_list{i},'df',''),"\",subject_list{i},"_Run",num2str(r),"_tidy.csv");
+            run_info=cellfun(@(x) regexprep(x,'"',''),...
+                read_mixed_csv(csv,','),'un',0);
+            run_info=cell2table(run_info(2:end,2:end), 'VariableNames',run_info(1,2:end));
+          % Mutate the following variable type to numeric
+            run_info.fix_onset=str2double(run_info.fix_onset);
+            run_info.fix_duration=str2double(run_info.fix_duration);
+            run_info.fraccomp_sti_onset=str2double(run_info.fraccomp_sti_onset);
+            run_info.fraccomp_sti_dis=str2double(run_info.fraccomp_sti_dis);
+            run_info.fraccomp_resp_onset=str2double(run_info.fraccomp_resp_onset);
+            run_info.fraccomp_resp_RT=str2double(run_info.fraccomp_resp_RT);
+            run_info.fraccomp_resp_acc=str2double(run_info.fraccomp_resp_acc);
+            run_info.fraccomp_sti_value_left=str2double(run_info.fraccomp_sti_value_left);
+            run_info.fraccomp_sti_value_right=str2double(run_info.fraccomp_sti_value_right);
+            run_info.fraccomp_sti_dis_abs=abs(run_info.fraccomp_sti_dis);% Create a column for absolute distance
+          % Adjust the onset time: set the time=0 point to t=10s point(first fixation appears), instead of the starting time of Eprime
+            t0=min(run_info.fix_onset);
+            for v=1:length(onset_var)
+                run_info{:,onset_var{v}}=run_info{:,onset_var{v}}-t0;
+            end
+
+            for v=1:length(time_var) %Covert from ms to second
+                run_info{:,time_var{v}}=run_info{:,time_var{v}}/1000;
+            end
+          % Get the row indexes of non-dummy and hummy trials
+            row_dummy=strcmp(run_info.trial_order,'NA');
+            row_non_dummy=~row_dummy;
+          % Get all design matix variables: e.g., onset times and distance value
+            sti_type_index=cellfun(@numel,regexpi(run_info.fraccomp_sti_type,'l'));% Count how many mathces of 'L/l'(case-insensitive)
+            LL_onset=run_info{sti_type_index==2 & row_non_dummy,'fraccomp_sti_onset'};
+            LF_onset=run_info{sti_type_index==1 & row_non_dummy,'fraccomp_sti_onset'};
+            FF_onset=run_info{sti_type_index==0 & row_non_dummy,'fraccomp_sti_onset'};
+
+            LL_distance=run_info{sti_type_index==2 & row_non_dummy,'fraccomp_sti_dis_abs'};
+            LF_distance=run_info{sti_type_index==1 & row_non_dummy,'fraccomp_sti_dis_abs'};
+            FF_distance=run_info{sti_type_index==0 & row_non_dummy,'fraccomp_sti_dis_abs'};
+            
+            % Deal with the missing onset time in df1002 run 1.
+            % Use interpolation to fill it up.
+            if (strcmp(subject_list{i},'df1002') && run==1)
+                dummy_onset=199.678; 
+            else
+                dummy_onset=run_info{row_dummy,'fraccomp_sti_onset'};
+            end
+            
+            current_miss=strcmp(run_info.fraccomp_resp,'');% all miss response(no matter dummy or not)
+            resp_onset=run_info{row_non_dummy & ~current_miss,'fraccomp_resp_onset'}; % Only include those which is not null or dummy
+            resp_error=double(run_info{row_non_dummy & ~current_miss,'fraccomp_resp_acc'}==0);%Null should be excluded otherewise in the first placeit will be misclassified as 'error'
+
+            %Consider to remove the fixation event so that it could be regarded
+            %as the
+            %baseline-----------------------------------------------------------------------------------------------------
+            fix_onset=run_info{:,'fix_onset'};%Including the fixation in the dummy trials
+            fix_previous_miss=[0;current_miss(1:end-1)];%Miss of the previous trial affect the following fixation activity
+
+          % Insertion into the
+          % 'matlabbatch'--------------------------------------------
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(1).name = 'Line_Line';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(1).onset = LL_onset;                     
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(1).pmod.name = 'LL_Distance';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(1).pmod.param = LL_distance;
+
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(2).name = 'Line_Frac';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(2).onset = LF_onset;
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(2).pmod.name = 'LF_Distance';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(2).pmod.param = LF_distance;
+
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(3).name = 'Frac_Frac';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(3).onset = FF_onset;
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(3).pmod.name = 'FF_Distance';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(3).pmod.param = FF_distance;
+
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(4).name = 'Dummy';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(4).onset = dummy_onset;
+
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(5).name = 'Resp';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(5).onset = resp_onset;
+                % Remove the 'incorrect response' parametric modulator if there were no such a thing in this run
+                if (sum(resp_error)>0)
+                    matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(5).pmod.name='Error';
+                    matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(5).pmod.param=resp_error;
+                else
+                    matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(5).pmod=struct([]) ;
+                end
+
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(6).name = 'Fixation';
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(6).onset = fix_onset;
+                % Remove the 'Previous Miass response' parametric modulator if there were no such a thing in this run
+                if (sum(fix_previous_miss)>0)
+                    matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(6).pmod.name='Previous_Miss';
+                    matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(6).pmod.param=fix_previous_miss;
+                else
+                    matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).cond(6).pmod=struct([]);
+                end
+            motion_parameters_file=strcat('D:\Yun-Shiuan_LAMBDA\preprocessed_data_without_reslice\',...
+                                            subject_list{i},'\rp_arun_',...
+                                            num2str(r),'.txt');
+            matlabbatch{1}.spm.stats.fmri_spec.sess(batch_index).multi_reg = {motion_parameters_file};             
+        end
+        % Remove redundant sessions if less than 6 valid runs
+        remove_index=length(run_valid)+1; %remove the index which equals to amount+1
+        while(batch_index < 6)
+            batch_index=batch_index+1;
+            matlabbatch{1}.spm.stats.fmri_spec.sess(remove_index)=[];
+        end
+        % Save the matlabbatch
+        save(strcat(output_dir,'\first_level_batch'),'matlabbatch');
+    end
+end
+%% Run All First Level Batches
+error_first_level=cell(length(subject_list),1);
+% Note that some subjects don't have the first_level_batch since all of the
+% are excluded due to excess head motion.
+for i=1:length(subject_list) %split this into two loops
+        try
+         load(strcat('D:\Yun-Shiuan_LAMBDA\First_level_parametric_design_matrix_and_result\with_reslice\',...
+             subject_list{i},'\first_level_batch.mat'));
+         spm_jobman('run',matlabbatch);
+         strcat('Finish:',subject_list{i})
+        catch ME
+            error_first_level{i,1}=strcat('Sub',subject_list{i},': ',ME.message)
+        end
+end
+save('error_first_level_record.mat','error_first_level')
